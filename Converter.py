@@ -1,8 +1,9 @@
 import os
 import logging
 import time
+import re
 from flask import Flask, request, jsonify
-from PIL import Image
+from PIL import Image, ImageEnhance
 import requests
 from io import BytesIO
 
@@ -12,16 +13,87 @@ logging.basicConfig(
     handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-
 app = Flask(__name__)
+
+ROBLOX_ASSET_URL = "https://assetdelivery.roblox.com/v1/asset/?id={}"
+ROBLOX_THUMBNAIL_URL = "https://thumbnails.roblox.com/v1/assets?assetIds={}&returnPolicy=PlaceHolder&size=420x420&format=Png&isCircular=false"
+
+SUPPORTED_FORMATS = {
+    'JPEG', 'JPG', 'PNG', 'GIF', 'BMP', 'TIFF', 'WEBP', 'ICO'
+}
+
+def is_roblox_asset_id(url_or_id):
+    """Check if the input is a Roblox asset ID"""
+    if isinstance(url_or_id, str):
+        return url_or_id.isdigit()
+    return False
+
+def get_roblox_image_url(asset_id):
+    """Get the actual image URL from Roblox asset ID"""
+    try:
+        thumbnail_url = ROBLOX_THUMBNAIL_URL.format(asset_id)
+        response = requests.get(thumbnail_url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get('data') and len(data['data']) > 0:
+                image_url = data['data'][0].get('imageUrl')
+                if image_url:
+                    return image_url
+        
+        asset_url = ROBLOX_ASSET_URL.format(asset_id)
+        return asset_url
+        
+    except Exception as e:
+        logger.warning(f"Failed to get Roblox thumbnail, using direct asset URL: {str(e)}")
+        return ROBLOX_ASSET_URL.format(asset_id)
+
+def enhance_image_quality(image):
+    """Apply quality enhancements before resizing"""
+    if image.mode != 'RGB':
+        if image.mode == 'RGBA':
+            background = Image.new('RGB', image.size, (255, 255, 255))
+            background.paste(image, mask=image.split()[-1])
+            image = background
+        else:
+            image = image.convert('RGB')
+    
+    enhancer = ImageEnhance.Sharpness(image)
+    image = enhancer.enhance(1.2)
+    
+    enhancer = ImageEnhance.Contrast(image)
+    image = enhancer.enhance(1.1)
+    
+    return image
+
+def resize_with_quality(image, target_size):
+    """Resize image with high quality resampling"""
+    original_size = image.size
+    
+    if original_size[0] < target_size[0] or original_size[1] < target_size[1]:
+        image = image.resize(
+            (max(original_size[0], target_size[0] * 2), 
+             max(original_size[1], target_size[1] * 2)), 
+            Image.Resampling.LANCZOS
+        )
+    
+    image = image.resize(target_size, Image.Resampling.LANCZOS)
+    return image
 
 @app.route('/')
 def home():
     logger.info("Home endpoint accessed")
     return jsonify({
-        "message": "Welcome to the Image Converter API!",
+        "message": "Welcome to the Enhanced Image Converter API!",
         "status": "deployed",
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "features": [
+            "High-quality image conversion",
+            "Multiple format support (PNG, JPEG, GIF, BMP, TIFF, WEBP, ICO)",
+            "Roblox asset ID support",
+            "Configurable output dimensions",
+            "Enhanced pixel processing"
+        ]
     }), 200
 
 @app.route('/health')
@@ -33,38 +105,73 @@ def convert_image():
     start_time = time.time()
     logger.info("Convert image endpoint accessed")
     
-    image_url = request.args.get('url')
-    if not image_url:
-        logger.warning("No URL provided in request")
-        return jsonify({'error': 'No URL provided in query parameters'}), 400
+    image_input = request.args.get('url') or request.args.get('id')
+    width = int(request.args.get('width', 32))
+    height = int(request.args.get('height', 32))
     
-    logger.info(f"Processing image from URL: {image_url}")
+    if width > 512 or height > 512:
+        return jsonify({'error': 'Maximum dimensions are 512x512'}), 400
+    
+    if not image_input:
+        logger.warning("No URL or ID provided in request")
+        return jsonify({'error': 'No URL or asset ID provided in query parameters (use ?url= or ?id=)'}), 400
     
     try:
-        response = requests.get(image_url, timeout=15)
-
+        if is_roblox_asset_id(image_input):
+            logger.info(f"Processing Roblox asset ID: {image_input}")
+            image_url = get_roblox_image_url(image_input)
+            logger.info(f"Resolved to URL: {image_url}")
+        else:
+            image_url = image_input
+            logger.info(f"Processing image from URL: {image_url}")
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(image_url, timeout=15, headers=headers)
+        
         if response.status_code != 200:
             logger.error(f"Failed to fetch image: HTTP {response.status_code}")
             return jsonify({'error': f'Failed to fetch image: HTTP {response.status_code}'}), 500
-
+        
         try:
             image = Image.open(BytesIO(response.content))
+            original_format = image.format
+            logger.info(f"Opened image: {image.size}, format: {original_format}")
         except Exception as e:
             logger.error(f"Failed to open image: {str(e)}")
             return jsonify({'error': f'Failed to open image: {str(e)}'}), 500
-
-        image = image.resize((32, 32))
-
+        
+        if original_format not in SUPPORTED_FORMATS:
+            logger.warning(f"Unsupported format: {original_format}")
+        
+        image = enhance_image_quality(image)
+        image = resize_with_quality(image, (width, height))
+        
         pixels = []
         try:
             for y in range(image.height):
+                row = []
                 for x in range(image.width):
                     pixel = image.getpixel((x, y))
-                    if len(pixel) >= 3:
-                        r, g, b = pixel[:3]
+                    
+                    if isinstance(pixel, tuple):
+                        if len(pixel) >= 3:
+                            r, g, b = pixel[:3]
+                        elif len(pixel) == 1:
+                            r = g = b = pixel[0]
+                        else:
+                            r = g = b = pixel
                     else:
-                        r = g = b = pixel if isinstance(pixel, int) else pixel[0]
-                    pixels.append({'R': r, 'G': g, 'B': b})
+                        r = g = b = pixel if isinstance(pixel, int) else 0
+                    
+                    r = max(0, min(255, int(r)))
+                    g = max(0, min(255, int(g)))
+                    b = max(0, min(255, int(b)))
+                    
+                    row.append({'R': r, 'G': g, 'B': b})
+                pixels.extend(row)
+                
         except Exception as e:
             logger.error(f"Error processing pixels: {str(e)}")
             return jsonify({'error': f'Error processing pixels: {str(e)}'}), 500
@@ -74,8 +181,14 @@ def convert_image():
         
         return jsonify({
             'pixels': pixels,
-            'processing_time': processing_time
+            'width': width,
+            'height': height,
+            'total_pixels': len(pixels),
+            'processing_time': processing_time,
+            'original_format': original_format,
+            'enhancements_applied': True
         })
+        
     except requests.exceptions.Timeout:
         logger.error("Request timed out")
         return jsonify({'error': 'Request timed out fetching the image'}), 504
@@ -86,7 +199,16 @@ def convert_image():
         logger.error(f"Unexpected error: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+@app.route('/formats')
+def supported_formats():
+    return jsonify({
+        'supported_formats': list(SUPPORTED_FORMATS),
+        'roblox_support': True,
+        'max_dimensions': '512x512',
+        'default_size': '32x32'
+    })
+
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 5000))
-    logger.info(f"Starting application on port {port}")
+    logger.info(f"Starting enhanced application on port {port}")
     app.run(host='0.0.0.0', port=port)
