@@ -126,13 +126,59 @@ def convert_image():
             logger.info(f"Processing image from URL: {image_url}")
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site'
         }
-        response = requests.get(image_url, timeout=15, headers=headers)
+        
+        domain = image_url.split('/')[2] if len(image_url.split('/')) > 2 else ''
+        
+        if 'stockcake.com' in domain.lower():
+            headers['Referer'] = 'https://stockcake.com/'
+        elif 'imgur.com' in domain.lower():
+            headers['Referer'] = 'https://imgur.com/'
+        elif 'discord' in domain.lower():
+            headers['Referer'] = 'https://discord.com/'
+        elif 'pinterest' in domain.lower():
+            headers['Referer'] = 'https://www.pinterest.com/'
+        else:
+            headers['Referer'] = f"https://{domain}/"
+        
+        response = requests.get(image_url, timeout=20, headers=headers, stream=True, allow_redirects=True)
+        
+        if response.status_code == 403:
+            logger.warning("403 Forbidden - trying alternative approach")
+            alt_headers = {
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1',
+                'Referer': 'https://www.google.com/',
+                'Accept': 'image/*,*/*'
+            }
+            response = requests.get(image_url, timeout=20, headers=alt_headers, allow_redirects=True)
+        
+        if response.status_code == 429:
+            logger.warning("Rate limited - waiting before retry")
+            time.sleep(2)
+            response = requests.get(image_url, timeout=20, headers=headers, allow_redirects=True)
         
         if response.status_code != 200:
             logger.error(f"Failed to fetch image: HTTP {response.status_code}")
-            return jsonify({'error': f'Failed to fetch image: HTTP {response.status_code}'}), 500
+            return jsonify({
+                'error': f'Failed to fetch image: HTTP {response.status_code}',
+                'url_tested': image_url,
+                'suggestion': 'Try a different image URL or check if the image is publicly accessible'
+            }), 500
+        
+        if len(response.content) == 0:
+            return jsonify({'error': 'Empty image file received'}), 500
+        
+        content_type = response.headers.get('content-type', '').lower()
+        if content_type and not any(img_type in content_type for img_type in ['image/', 'application/octet-stream']):
+            return jsonify({'error': f'URL does not point to an image (content-type: {content_type})'}), 400
         
         try:
             image = Image.open(BytesIO(response.content))
@@ -140,10 +186,13 @@ def convert_image():
             logger.info(f"Opened image: {image.size}, format: {original_format}")
         except Exception as e:
             logger.error(f"Failed to open image: {str(e)}")
-            return jsonify({'error': f'Failed to open image: {str(e)}'}), 500
+            return jsonify({
+                'error': f'Failed to open image: {str(e)}',
+                'suggestion': 'The URL might not point to a valid image file'
+            }), 500
         
-        if original_format not in SUPPORTED_FORMATS:
-            logger.warning(f"Unsupported format: {original_format}")
+        if original_format not in SUPPORTED_FORMATS and original_format:
+            logger.warning(f"Potentially unsupported format: {original_format}")
         
         image = enhance_image_quality(image)
         image = resize_with_quality(image, (width, height))
@@ -151,7 +200,6 @@ def convert_image():
         pixels = []
         try:
             for y in range(image.height):
-                row = []
                 for x in range(image.width):
                     pixel = image.getpixel((x, y))
                     
@@ -161,16 +209,15 @@ def convert_image():
                         elif len(pixel) == 1:
                             r = g = b = pixel[0]
                         else:
-                            r = g = b = pixel
+                            r = g = b = pixel if isinstance(pixel, (int, float)) else 0
                     else:
-                        r = g = b = pixel if isinstance(pixel, int) else 0
+                        r = g = b = pixel if isinstance(pixel, (int, float)) else 0
                     
                     r = max(0, min(255, int(r)))
                     g = max(0, min(255, int(g)))
                     b = max(0, min(255, int(b)))
                     
-                    row.append({'R': r, 'G': g, 'B': b})
-                pixels.extend(row)
+                    pixels.append({'R': r, 'G': g, 'B': b})
                 
         except Exception as e:
             logger.error(f"Error processing pixels: {str(e)}")
@@ -186,18 +233,18 @@ def convert_image():
             'total_pixels': len(pixels),
             'processing_time': processing_time,
             'original_format': original_format,
-            'enhancements_applied': True
+            'success': True
         })
         
     except requests.exceptions.Timeout:
         logger.error("Request timed out")
-        return jsonify({'error': 'Request timed out fetching the image'}), 504
+        return jsonify({'error': 'Request timed out fetching the image (20s limit)'}), 504
     except requests.exceptions.RequestException as e:
         logger.error(f"Request error: {str(e)}")
-        return jsonify({'error': f'Request error: {str(e)}'}), 500
+        return jsonify({'error': f'Network error: {str(e)}'}), 500
     except Exception as e:
         logger.error(f"Unexpected error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({'error': f'Unexpected error: {str(e)}'}), 500
 
 @app.route('/formats')
 def supported_formats():
