@@ -18,10 +18,23 @@ def fetch_image_from_source(src):
     if src.isdigit() or src.lower().startswith("rbxassetid://"):
         asset_id = src.replace("rbxassetid://", "")
         src = f"https://www.roblox.com/asset-thumbnail/image?assetId={asset_id}&width=420&height=420&format=png"
-    resp = requests.get(src, timeout=15)
+
+    resp = requests.get(src, timeout=20, allow_redirects=True, headers={
+        "User-Agent": "Mozilla/5.0"
+    })
     if resp.status_code != 200:
         raise Exception(f"Failed to fetch image: HTTP {resp.status_code}")
-    return Image.open(BytesIO(resp.content))
+
+    image = Image.open(BytesIO(resp.content))
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGBA")
+
+    if image.mode == "RGBA":
+        bg = Image.new("RGB", image.size, (255, 255, 255))
+        bg.paste(image, mask=image.split()[-1])
+        image = bg
+
+    return image.resize((32, 32), Image.LANCZOS)
 
 @app.route('/')
 def home():
