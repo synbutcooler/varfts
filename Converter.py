@@ -19,16 +19,22 @@ def fetch_image_from_source(src):
         asset_id = src.replace("rbxassetid://", "")
         src = f"https://www.roblox.com/asset-thumbnail/image?assetId={asset_id}&width=420&height=420&format=png"
 
-    resp = requests.get(src, timeout=20, allow_redirects=True, headers={
-        "User-Agent": "Mozilla/5.0"
-    })
+    resp = requests.get(
+        src,
+        timeout=20,
+        allow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0"}
+    )
     if resp.status_code != 200:
         raise Exception(f"Failed to fetch image: HTTP {resp.status_code}")
 
     image = Image.open(BytesIO(resp.content))
+
+    # Ensure RGB
     if image.mode not in ("RGB", "RGBA"):
         image = image.convert("RGBA")
 
+    # Handle transparency
     if image.mode == "RGBA":
         bg = Image.new("RGB", image.size, (255, 255, 255))
         bg.paste(image, mask=image.split()[-1])
@@ -59,20 +65,12 @@ def convert_image():
 
     try:
         image = fetch_image_from_source(image_url)
-        if image.mode != "RGB":
-            if image.mode in ("RGBA", "LA"):
-                bg = Image.new("RGB", image.size, (255, 255, 255))
-                bg.paste(image, mask=image.split()[-1])
-                image = bg
-            else:
-                image = image.convert("RGB")
-        image = image.resize((32, 32), Image.LANCZOS)
-        pixels = []
-        for y in range(image.height):
-            for x in range(image.width):
-                r, g, b = image.getpixel((x, y))
-                pixels.append({'R': r, 'G': g, 'B': b})
-
+        pixels = [
+            {'R': r, 'G': g, 'B': b}
+            for y in range(image.height)
+            for x in range(image.width)
+            for r, g, b in [image.getpixel((x, y))]
+        ]
         processing_time = time.time() - start_time
         logger.info(f"Image processed successfully in {processing_time:.2f} seconds")
 
